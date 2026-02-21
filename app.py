@@ -15,7 +15,7 @@ processed_updates = set()
 
 @app.route("/", methods=["GET"])
 def home():
-    return "SRT Bot Running! v4", 200
+    return "SRT Bot Running! v5", 200
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -32,7 +32,7 @@ def webhook():
     chat_id = message["chat"]["id"]
 
     try:
-        # ===== VIDEO UPLOAD =====
+        # ===== VIDEO / DOCUMENT UPLOAD =====
         if "video" in message or "document" in message:
             media = message.get("video") or message.get("document")
             file_size_mb = media.get("file_size", 0) / (1024 * 1024)
@@ -74,7 +74,7 @@ def webhook():
             send_message(chat_id, "🎬 Fetching audio from YouTube...")
             result = try_yt_dlp(url)
             if not result:
-                send_message(chat_id, "❌ YouTube blocked audio extraction on this server.\n\n💡 Workaround: Download the video on your phone and send it here as a file!")
+                send_message(chat_id, "❌ YouTube blocked audio extraction on this server.\n\n💡 Tip: Download the video on your phone and send it here as a file!")
                 return "OK", 200
             audio_bytes, mime = result
             handle_audio_bytes(chat_id, audio_bytes, mime)
@@ -85,7 +85,7 @@ def webhook():
             send_message(chat_id, "📸 Fetching audio from Instagram...")
             result = try_yt_dlp(url)
             if not result:
-                send_message(chat_id, "❌ Could not extract audio.\n\n💡 Workaround: Download the reel and send it here as a file!")
+                send_message(chat_id, "❌ Could not extract audio.\n\n💡 Tip: Download the reel and send it here as a file!")
                 return "OK", 200
             audio_bytes, mime = result
             handle_audio_bytes(chat_id, audio_bytes, mime)
@@ -144,8 +144,6 @@ def handle_video_url(chat_id, video_url):
         send_message(chat_id, "⬆️ Uploading to AI...")
         r = requests.get(video_url, timeout=60)
         print(f"Video download size: {len(r.content)} bytes")
-        
-        # Try as video first, then audio
         uri = upload_to_gemini(r.content, "video/mp4")
         if not uri:
             send_message(chat_id, "❌ Failed to upload to Gemini. Try a shorter video.")
@@ -183,10 +181,9 @@ def upload_to_gemini(file_bytes, mime_type):
             timeout=120
         )
         result = r.json()
-        print(f"Gemini upload: {result}")
+        print(f"Gemini upload result: {result}")
         uri = result.get("file", {}).get("uri")
         if uri:
-            print(f"Gemini URI: {uri}")
             return uri
         return None
     except Exception as e:
@@ -196,7 +193,8 @@ def upload_to_gemini(file_bytes, mime_type):
 
 def generate_subtitles(chat_id, file_uri, mime_type):
     try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+        # Using gemini-2.0-flash (latest working model)
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
         payload = {
             "contents": [{
                 "parts": [
@@ -208,7 +206,7 @@ def generate_subtitles(chat_id, file_uri, mime_type):
         }
         r = requests.post(url, json=payload, timeout=120)
         result = r.json()
-        print(f"Gemini response: {result}")
+        print(f"Gemini generate result: {result}")
 
         if not result.get("candidates"):
             err = result.get("error", {}).get("message", "Unknown error")
@@ -238,7 +236,11 @@ def get_telegram_file_url(file_id):
 
 def send_message(chat_id, text):
     try:
-        requests.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": text}, timeout=30)
+        requests.post(
+            f"{TELEGRAM_API}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+            timeout=30
+        )
     except Exception as e:
         print(f"send_message error: {e}")
 
