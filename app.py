@@ -180,22 +180,44 @@ def generate_subtitles(chat_id, file_uri, mime_type):
 
 def get_cobalt_audio(url):
     try:
+        # Try new API format
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "url": url,
+            "downloadMode": "audio",
+            "audioFormat": "mp3",
+            "filenameStyle": "basic"
+        }
+        
         r = requests.post(
             "https://api.cobalt.tools/",
-            headers={"Accept": "application/json"},
-            json={"url": url, "downloadMode": "audio", "audioFormat": "mp3"}
+            headers=headers,
+            json=payload,
+            timeout=30
         )
+        
+        print(f"Cobalt response: {r.status_code} - {r.text}")  # for debugging
+        
         data = r.json()
-        if data.get("url"): return data["url"]
-        if data.get("status") == "tunnel": return data.get("url")
-        if data.get("status") == "redirect": return data.get("url")
+        
+        if data.get("status") == "tunnel" and data.get("url"):
+            return data["url"]
+        if data.get("status") == "redirect" and data.get("url"):
+            return data["url"]
+        if data.get("url"):
+            return data["url"]
         if data.get("status") == "picker":
             if data.get("audio"): return data["audio"]
             if data.get("picker"): return data["picker"][0]["url"]
+        
         return None
-    except:
+    except Exception as e:
+        print(f"Cobalt error: {e}")
         return None
-
 
 def get_telegram_file_url(file_id):
     r = requests.get(f"{TELEGRAM_API}/getFile?file_id={file_id}")
