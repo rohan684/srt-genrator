@@ -15,7 +15,7 @@ processed_updates = set()
 
 @app.route("/", methods=["GET"])
 def home():
-    return "SRT Bot Running! v3", 200
+    return "SRT Bot Running! v4", 200
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -33,15 +33,16 @@ def webhook():
 
     try:
         # ===== VIDEO UPLOAD =====
-        if "video" in message:
-            file_size_mb = message["video"].get("file_size", 0) / (1024 * 1024)
+        if "video" in message or "document" in message:
+            media = message.get("video") or message.get("document")
+            file_size_mb = media.get("file_size", 0) / (1024 * 1024)
             if file_size_mb > 20:
-                send_message(chat_id, "⚠️ Video too large. Please send under 20MB.")
+                send_message(chat_id, "⚠️ File too large. Please send under 20MB.")
                 return "OK", 200
-            send_message(chat_id, "📥 Video received. Preparing subtitles...")
-            file_id = message["video"]["file_id"]
+            send_message(chat_id, "📥 Video received. Generating subtitles...")
+            file_id = media["file_id"]
             file_url = get_telegram_file_url(file_id)
-            handle_video(chat_id, file_url)
+            handle_video_url(chat_id, file_url)
             return "OK", 200
 
         # ===== URL EXTRACTION =====
@@ -63,7 +64,7 @@ def webhook():
                 url = match.group(0)
 
         if not url:
-            send_message(chat_id, "📎 Send a YouTube/Instagram link or upload a video.")
+            send_message(chat_id, "📎 Send a YouTube/Instagram link or upload a video file (under 20MB).")
             return "OK", 200
 
         url = url.strip()
@@ -71,21 +72,23 @@ def webhook():
         # ===== YOUTUBE =====
         if any(x in url for x in ["youtube.com", "youtu.be", "m.youtube.com"]):
             send_message(chat_id, "🎬 Fetching audio from YouTube...")
-            audio_bytes = get_audio_ytdlp(url)
-            if not audio_bytes:
-                send_message(chat_id, "❌ Could not extract audio. Try uploading the video directly instead.")
+            result = try_yt_dlp(url)
+            if not result:
+                send_message(chat_id, "❌ YouTube blocked audio extraction on this server.\n\n💡 Workaround: Download the video on your phone and send it here as a file!")
                 return "OK", 200
-            handle_audio_bytes(chat_id, audio_bytes)
+            audio_bytes, mime = result
+            handle_audio_bytes(chat_id, audio_bytes, mime)
             return "OK", 200
 
         # ===== INSTAGRAM =====
         if any(x in url for x in ["instagram.com/reel", "instagram.com/p/", "instagram.com/tv/"]):
             send_message(chat_id, "📸 Fetching audio from Instagram...")
-            audio_bytes = get_audio_ytdlp(url)
-            if not audio_bytes:
-                send_message(chat_id, "❌ Could not extract audio. Try downloading and uploading the video directly.")
+            result = try_yt_dlp(url)
+            if not result:
+                send_message(chat_id, "❌ Could not extract audio.\n\n💡 Workaround: Download the reel and send it here as a file!")
                 return "OK", 200
-            handle_audio_bytes(chat_id, audio_bytes)
+            audio_bytes, mime = result
+            handle_audio_bytes(chat_id, audio_bytes, mime)
             return "OK", 200
 
         send_message(chat_id, "⚠️ Unsupported link.\n\nSupported:\n• YouTube / Shorts\n• Instagram Reels\n• Upload video file (under 20MB)")
@@ -97,89 +100,74 @@ def webhook():
     return "OK", 200
 
 
-def get_audio_ytdlp(url):
-    """Try multiple methods to download audio"""
-    
-    # Method 1: yt-dlp with cookies workaround
+def try_yt_dlp(url):
+    """Try to download audio with yt-dlp, return (bytes, mime_type) or None"""
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             output_template = os.path.join(tmpdir, "audio.%(ext)s")
             cmd = [
                 "yt-dlp",
-                "--extract-audio",
-                "--audio-format", "mp3",
-                "--audio-quality", "5",
+                "-f", "bestaudio[ext=m4a]/bestaudio/best",
                 "--no-playlist",
                 "--no-check-certificates",
-                "--extractor-retries", "3",
-                "--user-agent", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.210 Mobile Safari/537.36",
+                "--socket-timeout", "30",
                 "-o", output_template,
                 url
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            print(f"yt-dlp returncode: {result.returncode}")
-            print(f"yt-dlp stdout: {result.stdout[:500]}")
-            print(f"yt-dlp stderr: {result.stderr[:500]}")
-            
-            # Find output file
-            for f in os.listdir(tmpdir):
-                fpath = os.path.join(tmpdir, f)
-                if os.path.getsize(fpath) > 0:
-                    with open(fpath, 'rb') as file:
-                        return file.read()
-    except Exception as e:
-        print(f"yt-dlp method 1 error: {e}")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+            print(f"yt-dlp code: {result.returncode}")
+            print(f"yt-dlp stderr: {result.stderr[-500:]}")
 
-    # Method 2: Try with format selection
-    try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output_template = os.path.join(tmpdir, "audio.%(ext)s")
-            cmd = [
-                "yt-dlp",
-                "-f", "bestaudio/best",
-                "--no-playlist",
-                "--no-check-certificates",
-                "-o", output_template,
-                url
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            print(f"yt-dlp method2 returncode: {result.returncode}")
-            print(f"yt-dlp method2 stderr: {result.stderr[:500]}")
-            
-            for f in os.listdir(tmpdir):
-                fpath = os.path.join(tmpdir, f)
-                if os.path.getsize(fpath) > 0:
-                    with open(fpath, 'rb') as file:
-                        return file.read()
+            for fname in os.listdir(tmpdir):
+                fpath = os.path.join(tmpdir, fname)
+                size = os.path.getsize(fpath)
+                print(f"Found file: {fname} size: {size}")
+                if size > 0:
+                    ext = fname.rsplit('.', 1)[-1].lower()
+                    mime_map = {
+                        'm4a': 'audio/mp4',
+                        'mp4': 'video/mp4',
+                        'webm': 'video/webm',
+                        'mp3': 'audio/mpeg',
+                        'opus': 'audio/opus',
+                    }
+                    mime = mime_map.get(ext, 'audio/mpeg')
+                    with open(fpath, 'rb') as f:
+                        return f.read(), mime
     except Exception as e:
-        print(f"yt-dlp method 2 error: {e}")
-
+        print(f"yt-dlp error: {e}")
     return None
 
 
-def handle_video(chat_id, video_url):
+def handle_video_url(chat_id, video_url):
     try:
-        send_message(chat_id, "🎵 Processing video...")
+        send_message(chat_id, "⬆️ Uploading to AI...")
         r = requests.get(video_url, timeout=60)
-        uploaded = upload_to_gemini(r.content, "video/mp4")
-        if not uploaded:
-            send_message(chat_id, "❌ Failed to upload video to Gemini.")
+        print(f"Video download size: {len(r.content)} bytes")
+        
+        # Try as video first, then audio
+        uri = upload_to_gemini(r.content, "video/mp4")
+        if not uri:
+            send_message(chat_id, "❌ Failed to upload to Gemini. Try a shorter video.")
             return
-        generate_subtitles(chat_id, uploaded, "video/mp4")
+        generate_subtitles(chat_id, uri, "video/mp4")
     except Exception as e:
-        send_message(chat_id, f"🛑 Video processing failed: {str(e)}")
+        print(f"handle_video_url error: {e}")
+        send_message(chat_id, f"🛑 Failed: {str(e)}")
 
 
-def handle_audio_bytes(chat_id, audio_bytes):
+def handle_audio_bytes(chat_id, audio_bytes, mime_type):
     try:
         send_message(chat_id, "✍️ Generating subtitles...")
-        uploaded = upload_to_gemini(audio_bytes, "audio/mpeg")
-        if not uploaded:
+        print(f"Audio size: {len(audio_bytes)} bytes, mime: {mime_type}")
+        uri = upload_to_gemini(audio_bytes, mime_type)
+        if not uri:
             send_message(chat_id, "❌ Failed to upload audio to Gemini.")
             return
-        generate_subtitles(chat_id, uploaded, "audio/mpeg")
+        generate_subtitles(chat_id, uri, mime_type)
     except Exception as e:
-        send_message(chat_id, f"🛑 Audio processing failed: {str(e)}")
+        print(f"handle_audio_bytes error: {e}")
+        send_message(chat_id, f"🛑 Failed: {str(e)}")
 
 
 def upload_to_gemini(file_bytes, mime_type):
@@ -195,9 +183,11 @@ def upload_to_gemini(file_bytes, mime_type):
             timeout=120
         )
         result = r.json()
-        print(f"Gemini upload result: {result}")
-        if result.get("file", {}).get("uri"):
-            return result["file"]["uri"]
+        print(f"Gemini upload: {result}")
+        uri = result.get("file", {}).get("uri")
+        if uri:
+            print(f"Gemini URI: {uri}")
+            return uri
         return None
     except Exception as e:
         print(f"Gemini upload error: {e}")
@@ -214,27 +204,34 @@ def generate_subtitles(chat_id, file_uri, mime_type):
                     {"fileData": {"mimeType": mime_type, "fileUri": file_uri}}
                 ]
             }],
-            "generationConfig": {"temperature": 0.1, "topP": 0.8, "topK": 10}
+            "generationConfig": {"temperature": 0.1}
         }
         r = requests.post(url, json=payload, timeout=120)
         result = r.json()
-        print(f"Gemini generate result keys: {list(result.keys())}")
+        print(f"Gemini response: {result}")
+
         if not result.get("candidates"):
-            send_message(chat_id, "❌ AI failed to process the media.")
+            err = result.get("error", {}).get("message", "Unknown error")
+            send_message(chat_id, f"❌ AI failed: {err}")
             return
+
         srt = result["candidates"][0]["content"]["parts"][0]["text"]
         srt = srt.replace("```srt", "").replace("```", "").strip()
+
         if len(srt) < 10:
-            send_message(chat_id, "❌ Generated subtitles are empty.")
+            send_message(chat_id, "❌ Subtitles are empty. Is there speech in the video?")
             return
+
         send_file(chat_id, srt)
         send_message(chat_id, "✅ Subtitles generated successfully!")
+
     except Exception as e:
+        print(f"generate_subtitles error: {e}")
         send_message(chat_id, f"🛑 Subtitle generation failed: {str(e)}")
 
 
 def get_telegram_file_url(file_id):
-    r = requests.get(f"{TELEGRAM_API}/getFile?file_id={file_id}")
+    r = requests.get(f"{TELEGRAM_API}/getFile?file_id={file_id}", timeout=30)
     file_path = r.json()["result"]["file_path"]
     return f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
 
@@ -243,7 +240,7 @@ def send_message(chat_id, text):
     try:
         requests.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": text}, timeout=30)
     except Exception as e:
-        print(f"Send message error: {e}")
+        print(f"send_message error: {e}")
 
 
 def send_file(chat_id, srt_text):
@@ -260,7 +257,7 @@ def send_file(chat_id, srt_text):
             )
         os.unlink(fname)
     except Exception as e:
-        print(f"Send file error: {e}")
+        print(f"send_file error: {e}")
 
 
 if __name__ == "__main__":
